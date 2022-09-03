@@ -60,11 +60,13 @@ class Utilities(object):
     def export_files(df:DataFrame,target_s3_path: str,export_options: dict):
         if export_options['format']=='csv':
             temp_target_path = target_s3_path.strip('/')+"_tmp"
+            export_options = export_options.copy()
+            
             is_header = export_options.get("header")
             delimiter = export_options.get("delimiter",",")
-            
+            header=None
             if is_header and str(is_header).lower() == 'true':
-                utility_logger.debug("header option is set as true, and will be added separately while merging")
+                utility_logger.info("header option is set as true, and will be added separately while merging")
                 header = delimiter.join(df.columns) + "\n"
                 
                 # no need to provide header explicitly for spark
@@ -117,10 +119,11 @@ class Utilities(object):
                 hadoop.io.IOUtils.copyBytes(strr, out_stream,hadoop_conf,False)
         finally:
             out_stream.close()
-
+        utility_logger.info(f"file written to {destination_path}")
+        
         if deleteSource:
             fs.delete(Path(source_path), True)
-            utility_logger.debug(f"source path {source_path} removed.")
+            utility_logger.info(f"source path {source_path} removed.")
 
             
     def df_zip_with_index(df,offset=1,id_col='_id'):
