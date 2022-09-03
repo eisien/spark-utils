@@ -1,0 +1,144 @@
+from pyspark.sql.functions import expr
+from pyspark.sql.types import StructField,StructType,LongType
+from pyspark.sql import DataFrame
+from multiprocessing.pool import Pool
+import logging
+
+# databricks notebook utilities
+
+utility_logger = logging.getLogger("utilities")
+utility_logger.setLevel(dbutils.widgets.get("log_level"))
+
+class Utilities(object):
+      
+    def getColumnReferences(sql_expr):
+        """return the column name list refererred one level down in expression
+            Arguments:
+                sql_expr: the sql expression 
+            Returns:
+                the list of column names referred in the expression
+        """
+
+        references =  (expr(sql_expr) if isinstance(sql_expr,str) else sql_expr)._jc.expr().references().mkString(",").split(",")
+        
+        return list(filter(lambda x: True if str(x) else False, map(lambda c: c.replace("'",""),references)))
+        
+    
+    def path_accessible(path):
+        """
+        returns True if provided s3 path is accessible else False
+        Arguments:
+            path: the path to s3 object
+        Returns: 
+            boolean
+        """
+        try:
+            dbutils.fs.ls(path)
+            return True
+        except:
+            pass
+
+        return False
+    
+    def write_csv_to_s3(df:DataFrame,target_s3_path: str,export_options:dict):
+        """
+        write to s3 using spark dataframe only with repartition
+        """
+        if not export_options.get('format') or export_options['format']!='csv':
+            raise Exception("unsupported format specified.")
+        temp_s3_path = target_s3_path + "_temp"
+        df = df.repartition(1).write.mode('overwrite').save(temp_s3_path,**export_options)
+        part_file_info=list(filter(lambda x : x.path.endswith('.csv'),dbutils.fs.ls(temp_s3_path)))[0]
+        dbutils.fs.rm(target_s3_path,recurse=True)
+        if not dbutils.fs.mv(part_file_info.path,target_s3_path):
+            raise Exception(f"Problem moving part file to target s3 path '{target_s3_path}'")
+        
+        if not dbutils.fs.rm(temp_s3_path,recurse=True):
+            raise Exception(f"Problem deleting temp s3 path '{temp_s3_path}'")
+    
+    
+    def export_files(df:DataFrame,target_s3_path: str,export_options: dict):
+        if export_options['format']=='csv':
+            temp_target_path = target_s3_path.strip('/')+"_tmp"
+            is_header = export_options.get("header")
+            delimiter = export_options.get("delimiter",",")
+            
+            if is_header and str(is_header).lower() == 'true':
+                utility_logger.debug("header option is set as true, and will be added separately while merging")
+                header = delimiter.join(df.columns) + "\n"
+                
+                # no need to provide header explicitly for spark
+                export_options.pop("header")
+            df.write.mode('overwrite').save(temp_target_path,**export_options)
+            Utilities.mergeFiles(temp_target_path, target_s3_path, header=header, overwrite=True, deleteSource=True)
+            dbutils.fs.rm(temp_target_path,recurse=True)
+            
+    
+    def mergeFiles(source_path, destination_path, fmt ='csv', header:str = None, footer:str = None, overwrite=False, deleteSource=False):
+        """
+        Function to merge files to target path
+        Arguments:
+            
+        """
+        hadoop = spark._jvm.org.apache.hadoop
+        hadoop_conf = sc._jsc.hadoopConfiguration()
+        Path = sc._jvm.org.apache.hadoop.fs.Path
+        src_path = Path(source_path)
+        dest_path = Path(destination_path)
+        fs = src_path.getFileSystem(hadoop_conf)
+
+        if fs.exists(dest_path) and not overwrite:
+            raise Exception(f"destination path {destination_path} already exists.")
+
+        # fetch files to merge from source directory, it will also verify the format of files
+        files = spark.read.format(fmt).load(source_path).inputFiles()
+
+        if not files:
+            raise Exception(f"source directory {source_path} is empty")
+
+        out_stream = fs.create(dest_path)
+        
+        try:
+            if header:
+                strr = sc._jvm.java.io.StringBufferInputStream(header)
+                hadoop.io.IOUtils.copyBytes(strr, out_stream,hadoop_conf,False)
+                
+            for file in files:
+                utility_logger.debug(f"appending file {file} into {dest_path}")
+
+                in_stream = fs.open(Path(file))
+                try:
+                    hadoop.io.IOUtils.copyBytes(in_stream, out_stream, hadoop_conf, False) 
+                finally:
+                    in_stream.close()
+            
+            if footer:
+                strr = sc._jvm.java.io.StringBufferInputStream(footer)
+                hadoop.io.IOUtils.copyBytes(strr, out_stream,hadoop_conf,False)
+        finally:
+            out_stream.close()
+
+        if deleteSource:
+            fs.delete(Path(source_path), True)
+            utility_logger.debug(f"source path {source_path} removed.")
+
+            
+    def df_zip_with_index(df,offset=1,id_col='_id'):
+        """
+        
+        Enumerates dataframe rows with increasing id, like rdd.ZipWithIndex(), considering offset
+        
+        Arguments:
+            df: the dataframe
+            offset: offset from zipWithIndex()
+            id_col: name of the id column
+        Returns:
+            dataframe
+        """
+
+        new_schema = StructType( df.schema.fields + [StructField(id_col,LongType(),True)])
+
+        zipped_rdd = df.rdd.zipWithIndex().map(lambda args: (list(args[0])+[args[1] + offset]))
+
+        return spark.createDataFrame(zipped_rdd, new_schema)
+        
