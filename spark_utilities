@@ -4,6 +4,8 @@ from pyspark.sql import DataFrame
 from multiprocessing.pool import Pool
 import logging
 
+import pyspark.java_gateway as jv  # java gateway
+
 # databricks notebook utilities
 
 utility_logger = logging.getLogger("utilities")
