@@ -147,3 +147,28 @@ class Utilities(object):
 
         return spark.createDataFrame(zipped_rdd, new_schema)
         
+from collections import defaultdict
+def get_ec2_spot_interruption(instances=[], os=None, region=None) -> defaultdict(None):
+    import requests
+    import json
+    results = defaultdict(None)
+    url_interruptions = "https://spot-bid-advisor.s3.amazonaws.com/spot-advisor-data.json"
+    try:
+        response = requests.get(url=url_interruptions)
+        spot_advisor = json.loads(response.text)['spot_advisor']
+    except requests.exceptions.ConnectionError:
+        return
+    rates = {
+        0: "<5%",
+        1: "5-10%",
+        2: "10-15%",
+        3: "15-20%",
+        4: ">20%"
+    }
+    for ii in instances:
+        try:
+            rate = spot_advisor[region][os][ii]['r']
+            results[ii] = rates[rate]
+        except KeyError:
+            results[ii] = ""
+    return results
